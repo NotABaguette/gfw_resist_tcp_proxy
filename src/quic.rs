@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig, VarInt};
-use rustls::client::{ServerCertVerified, ServerCertVerifier};
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::RootCertStore;
 use std::fs::File;
