@@ -42,3 +42,56 @@ knock up GFW IP blockage
 - next step is to implement on xray-core
 - thus anyone can easily create a "tcp violation" config and revive blocked vps ip
 
+# Rust implementation
+This repository now includes a full Rust implementation of the TCP violation proxy. It mirrors the Python prototype in `method1` and keeps the same port mapping + QUIC tunnel behavior.
+
+## Build
+```bash
+cargo build --release
+```
+
+## Run
+You need root/admin privileges because raw TCP packets are crafted and sniffed.
+
+Client (local machine):
+```bash
+sudo ./target/release/gfw-client --config config.toml
+```
+
+Server (VPS):
+```bash
+sudo ./target/release/gfw-server --config config.toml
+```
+
+## Configuration (TOML)
+Create a `config.toml` file. The defaults match `method1/parameters.py`.
+
+```toml
+vps_ip = "192.168.1.5"
+xray_server_ip_address = "127.0.0.1"
+vio_tcp_server_port = 45000
+vio_tcp_client_port = 40000
+vio_udp_server_port = 35000
+vio_udp_client_port = 30000
+quic_server_port = 25000
+quic_client_port = 20000
+quic_local_ip = "127.0.0.1"
+quic_idle_timeout = 86400
+udp_timeout = 300
+quic_verify_cert = false
+quic_mtu = 1420
+quic_cert_filepath = ["cert.pem", "key.pem"]
+quic_max_data = 1048576000
+quic_max_stream_data = 1048576000
+quic_auth_code = "jd!gn0s4"
+pcap_device = "eth0" # optional; omit to auto-select
+
+[tcp_port_mapping]
+14000 = 443
+15000 = 2096
+16000 = 10809
+
+[udp_port_mapping]
+17000 = 945
+18000 = 1014
+```
