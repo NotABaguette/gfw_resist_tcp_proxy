@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::tcp::{ipv4_checksum, MutableTcpPacket, TcpFlags};
-use pnet::packet::MutablePacket;
+use pnet::packet::{MutablePacket, Packet};
 use pnet::transport::{transport_channel, TransportChannelType, TransportSender};
 use std::net::Ipv4Addr;
 

@@ -1,9 +1,6 @@
 use anyhow::{anyhow, Result};
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig, VarInt};
-use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::RootCertStore;
+use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use rustls::{client::ServerCertVerifier, client::ServerCertVerified, Certificate, PrivateKey, RootCertStore};
 use std::fs::File;
 use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -19,22 +16,24 @@ pub fn build_client_endpoint(
     ca_cert_path: Option<&str>,
 ) -> Result<(Endpoint, ClientConfig)> {
     let mut endpoint = Endpoint::client(bind_addr)?;
-    let mut rustls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(load_roots(verify_cert, ca_cert_path)?)
-        .with_no_client_auth();
-    if !verify_cert {
-        rustls_config
-            .dangerous()
-            .set_certificate_verifier(Arc::new(NoVerifier));
-    }
-    let client_crypto = QuicClientConfig::try_from(rustls_config)?;
-    let mut client_config = ClientConfig::new(Arc::new(client_crypto));
+    let rustls_config = if verify_cert {
+        rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates(load_roots(verify_cert, ca_cert_path)?)
+            .with_no_client_auth()
+    } else {
+        rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+            .with_no_client_auth()
+    };
+    let mut client_config = ClientConfig::new(Arc::new(rustls_config));
 
     let mut transport_config = TransportConfig::default();
     transport_config.max_concurrent_uni_streams(0u32.into());
     transport_config.max_concurrent_bidi_streams(1024u32.into());
-    transport_config.receive_window(VarInt::from_u64(max_data)?);
-    transport_config.stream_receive_window(VarInt::from_u64(max_stream_data)?);
+    transport_config.receive_window(max_data.into());
+    transport_config.stream_receive_window(max_stream_data.into());
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(idle_timeout).try_into()?));
     transport_config.datagram_receive_buffer_size(Some(mtu as usize));
@@ -54,16 +53,12 @@ pub fn build_server_config(
 ) -> Result<ServerConfig> {
     let certs = read_certs(cert_path)?;
     let key = read_key(key_path)?;
-    let rustls_server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    let server_crypto = QuicServerConfig::try_from(rustls_server_config)?;
-    let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
+    let mut server_config = ServerConfig::with_single_cert(certs, key)?;
     let mut transport_config = TransportConfig::default();
     transport_config.max_concurrent_uni_streams(0u32.into());
     transport_config.max_concurrent_bidi_streams(1024u32.into());
-    transport_config.receive_window(VarInt::from_u64(max_data)?);
-    transport_config.stream_receive_window(VarInt::from_u64(max_stream_data)?);
+    transport_config.receive_window(max_data.into());
+    transport_config.stream_receive_window(max_stream_data.into());
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(idle_timeout).try_into()?));
     transport_config.datagram_receive_buffer_size(Some(mtu as usize));
@@ -71,20 +66,24 @@ pub fn build_server_config(
     Ok(server_config)
 }
 
-fn read_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
+fn read_certs(path: &str) -> Result<Vec<Certificate>> {
     let certfile = File::open(path)?;
     let mut reader = BufReader::new(certfile);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<std::result::Result<Vec<_>, _>>()?;
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(Certificate)
+        .collect();
     Ok(certs)
 }
 
-fn read_key(path: &str) -> Result<PrivateKeyDer<'static>> {
+fn read_key(path: &str) -> Result<PrivateKey> {
     let keyfile = File::open(path)?;
     let mut reader = BufReader::new(keyfile);
     let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     if let Some(key) = keys.into_iter().next() {
-        Ok(PrivateKeyDer::Pkcs8(key))
+        Ok(PrivateKey(key))
     } else {
         Err(anyhow!("no private key found"))
     }
@@ -99,7 +98,13 @@ fn load_roots(verify_cert: bool, ca_cert_path: Option<&str>) -> Result<RootCertS
                 roots.add(&cert)?;
             }
         } else {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            roots.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
+                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+                    ta.subject,
+                    ta.spki,
+                    ta.name_constraints,
+                )
+            }));
         }
     }
     Ok(roots)
@@ -110,9 +115,10 @@ struct NoVerifier;
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
         _ocsp_response: &[u8],
         _now: std::time::SystemTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
