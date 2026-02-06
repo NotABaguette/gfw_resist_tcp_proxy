@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig, VarInt};
-use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::RootCertStore;
+use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use std::fs::File;
 use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,12 +20,11 @@ pub fn build_client_endpoint(
     let mut endpoint = Endpoint::client(bind_addr)?;
     let rustls_config = if verify_cert {
         rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates(load_roots(verify_cert, ca_cert_path)?)
             .with_no_client_auth()
     } else {
         rustls::ClientConfig::builder()
-            .with_safe_defaults()
+            .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
             .with_no_client_auth()
     };
@@ -103,6 +102,7 @@ fn load_roots(verify_cert: bool, ca_cert_path: Option<&str>) -> Result<RootCertS
     Ok(roots)
 }
 
+#[derive(Debug)]
 struct NoVerifier;
 
 impl ServerCertVerifier for NoVerifier {
@@ -111,11 +111,34 @@ impl ServerCertVerifier for NoVerifier {
         _end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::CryptoProvider::get_default()
+            .map(|provider| provider.signature_verification_algorithms.supported_schemes().to_vec())
+            .unwrap_or_default()
     }
 }
 
