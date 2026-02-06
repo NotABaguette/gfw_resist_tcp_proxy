@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
-use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
-use rustls::{client::ServerCertVerifier, client::ServerCertVerified, Certificate, PrivateKey, RootCertStore};
+use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig, VarInt};
+use rustls::client::{ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::RootCertStore;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -27,13 +29,15 @@ pub fn build_client_endpoint(
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
             .with_no_client_auth()
     };
-    let mut client_config = ClientConfig::new(Arc::new(rustls_config));
+    let quic_client_config =
+        quinn::crypto::rustls::QuicClientConfig::try_from(rustls_config)?;
+    let mut client_config = ClientConfig::new(Arc::new(quic_client_config));
 
     let mut transport_config = TransportConfig::default();
     transport_config.max_concurrent_uni_streams(0u32.into());
     transport_config.max_concurrent_bidi_streams(1024u32.into());
-    transport_config.receive_window(max_data.into());
-    transport_config.stream_receive_window(max_stream_data.into());
+    transport_config.receive_window(VarInt::from_u64(max_data)?);
+    transport_config.stream_receive_window(VarInt::from_u64(max_stream_data)?);
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(idle_timeout).try_into()?));
     transport_config.datagram_receive_buffer_size(Some(mtu as usize));
@@ -57,8 +61,8 @@ pub fn build_server_config(
     let mut transport_config = TransportConfig::default();
     transport_config.max_concurrent_uni_streams(0u32.into());
     transport_config.max_concurrent_bidi_streams(1024u32.into());
-    transport_config.receive_window(max_data.into());
-    transport_config.stream_receive_window(max_stream_data.into());
+    transport_config.receive_window(VarInt::from_u64(max_data)?);
+    transport_config.stream_receive_window(VarInt::from_u64(max_stream_data)?);
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(idle_timeout).try_into()?));
     transport_config.datagram_receive_buffer_size(Some(mtu as usize));
@@ -66,24 +70,21 @@ pub fn build_server_config(
     Ok(server_config)
 }
 
-fn read_certs(path: &str) -> Result<Vec<Certificate>> {
+fn read_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
     let certfile = File::open(path)?;
     let mut reader = BufReader::new(certfile);
     let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(Certificate)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(certs)
 }
 
-fn read_key(path: &str) -> Result<PrivateKey> {
+fn read_key(path: &str) -> Result<PrivateKeyDer<'static>> {
     let keyfile = File::open(path)?;
     let mut reader = BufReader::new(keyfile);
     let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     if let Some(key) = keys.into_iter().next() {
-        Ok(PrivateKey(key))
+        Ok(PrivateKeyDer::from(key))
     } else {
         Err(anyhow!("no private key found"))
     }
@@ -94,17 +95,9 @@ fn load_roots(verify_cert: bool, ca_cert_path: Option<&str>) -> Result<RootCertS
     if verify_cert {
         if let Some(path) = ca_cert_path {
             let certs = read_certs(path)?;
-            for cert in certs {
-                roots.add(&cert)?;
-            }
+            roots.add_parsable_certificates(certs);
         } else {
-            roots.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            }));
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
     }
     Ok(roots)
@@ -115,9 +108,9 @@ struct NoVerifier;
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &rustls::ServerName,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName,
         _scts: &mut dyn Iterator<Item = &[u8]>,
         _ocsp_response: &[u8],
         _now: std::time::SystemTime,
