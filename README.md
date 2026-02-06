@@ -42,3 +42,33 @@ knock up GFW IP blockage
 - next step is to implement on xray-core
 - thus anyone can easily create a "tcp violation" config and revive blocked vps ip
 
+# Rust implementation (full)
+This repository now includes a full Rust implementation of method1 that mirrors the Python behavior (vio + QUIC tunnel). It includes four binaries:
+- `vio-client` / `vio-server`: raw TCP violation packet sender/sniffer + UDP bridge.
+- `quic-client` / `quic-server`: QUIC tunnel that multiplexes TCP/UDP streams.
+- `mainclient` / `mainserver`: convenience wrappers that launch the two components together.
+
+## Build
+```bash
+cargo build --release
+```
+
+## Configure
+Edit `config.toml` (same fields as `method1/parameters.py`). Make sure:
+- `vps_ip` is the blocked VPS IP.
+- `vio_tcp_*` ports are **closed** at OS firewall to prevent the kernel from replying with RST.
+- `quic_*` ports are reachable between client and server.
+- Tune `udp_buffer_bytes` / `tcp_buffer_bytes` for high-throughput environments.
+
+## Run
+On VPS:
+```bash
+sudo ./target/release/mainserver --config config.toml
+```
+
+On client:
+```bash
+sudo ./target/release/mainclient --config config.toml
+```
+
+> Root/admin access is required for raw packet capture and injection.
